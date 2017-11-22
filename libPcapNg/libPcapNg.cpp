@@ -5,11 +5,9 @@
 #include <iostream>
 #include <fstream>
 #include "libPcapNg.h"
-#include <vector>
 #include <string>
-#include <sstream>
 
-const bool DEBUG = true;
+const bool DEBUG = false;
 const int IPpayloadOffset = 0x0e; // Offset to the start of the IP packet from the start of the ethernet frame
 const int FSFB2OffSetPayLoad = 0x49; // Offset to the start of the FSFB2 payload from the start of the ethernet frame
 const int packetDataOffsetEnhPB = 28; // Offset of packet data position in enhanced Packet Block
@@ -51,6 +49,22 @@ int char2int(char *input, int start, int width, endianness iEndianess) {
 	return output;
 }
 
+// Implementation of class FSFB2BSDpacket
+FSFB2BSDpacket::FSFB2BSDpacket() {
+	nextFSFB2BSDPacket = NULL;
+	payload = NULL;
+}
+
+FSFB2BSDpacket::~FSFB2BSDpacket() {
+	FSFB2BSDpacket *currentBSD = this;
+	FSFB2BSDpacket *oldBSD;
+	while (currentBSD != NULL) {
+		if (currentBSD->payload != NULL) {  delete currentBSD->payload; }
+		currentBSD = currentBSD->nextFSFB2BSDPacket;
+	}
+}
+
+
 class fileManagement {
 private:
 	char* memblock; // Temporary buffer for reading pCapNG file
@@ -60,9 +74,9 @@ private:
 	int currentPos = 0; // Temporary counter to track position within the pCap
 	std::string namePcapFile; // Name of the pCapNG file
 	FSFB2BSDpacket* lastBSDptr = NULL; // Keep track of the last BSD (for quick addition to linked list)
+	int nbFilteredPacket = 0;
 
 public:
-//	std::vector<FSFB2BSDpacket> pCapFSFB2;
 	FSFB2BSDpacket* rootBSDptr;
 
 	fileManagement(std::string name_input) {
@@ -73,13 +87,8 @@ public:
 	}
 
 	~fileManagement() {
-		FSFB2BSDpacket myBSD = *rootBSDptr;
-		
 		if (memblock != NULL) { delete[] memblock; }
-		while (myBSD.nextFSFB2BSDPacket != NULL) {
-			if (myBSD.payload != NULL) { delete myBSD.payload; }
-			myBSD = *myBSD.nextFSFB2BSDPacket;
-		}
+		delete rootBSDptr;
 	}
 
 	// Load the pCapNG file in memory
@@ -116,6 +125,27 @@ public:
 		return(true);
 	}
 
+	//TODO: check that the allocation has succeeded
+	bool addFSFB2BSDPacket() {
+		if (rootBSDptr == NULL) {
+			rootBSDptr = new FSFB2BSDpacket();
+			lastBSDptr = rootBSDptr;
+		}
+		else {
+			lastBSDptr->nextFSFB2BSDPacket = new FSFB2BSDpacket();
+		}
+		return true;
+	}
+
+	bool addFSFB2BSDPacket(std::string IPsrc, std::string IPdst, int portSrc, int portDst) {
+		addFSFB2BSDPacket();
+		lastBSDptr->IPsrc = IPsrc;
+		lastBSDptr->IPdst = IPdst;
+		lastBSDptr->portsrc = portSrc;
+		lastBSDptr->portdst = portDst;
+		return true;
+	}
+
 	// Parse the Interface Description
 	bool parseInterfaceDescription() {
 		int interfaceBlockLength = 0;
@@ -133,30 +163,34 @@ public:
 			currentPos += interfaceBlockLength;
 			return(true); // if the packet is not UDP go to next
 		}
-//		pCapFSFB2.push_back(*new(FSFB2BSDpacket));
 
-		pCapFSFB2.back().IPsrc = std::to_string(char2int(memblock[currentPos + IPSrcOffset]))
+		std::string pCapIPsrc = std::to_string(char2int(memblock[currentPos + IPSrcOffset]))
 			+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 1]))
 			+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 2])) 
 			+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 3]));
-		if (pCapFSFB2.back().IPsrc != IPsrc) { currentPos += interfaceBlockLength; return true; }
-		pCapFSFB2.back().IPdst = std::to_string(char2int(memblock[currentPos + IPDstOffset])) 
+		if (pCapIPsrc != IPsrc) { currentPos += interfaceBlockLength; return true; }
+		std::string pCapIPdst = std::to_string(char2int(memblock[currentPos + IPDstOffset]))
 			+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 1]))
 			+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 2])) 
 			+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 3]));
-		if (pCapFSFB2.back().IPdst != IPdst) { currentPos += interfaceBlockLength; return true; }
+		if (pCapIPdst != IPdst) { currentPos += interfaceBlockLength; return true; }
 		// Note: Network convention is big endian - not related to the capture endianness of the machine
-		pCapFSFB2.back().portsrc = char2int(memblock, currentPos + PortSrcOffset, 2, BIG_ENDIAN); 
-		pCapFSFB2.back().portdst = char2int(memblock, currentPos + PortDstOffset, 2, BIG_ENDIAN);
-		pCapFSFB2.back().timestampH = char2int(memblock, currentPos + TimeStampHighOffsetEnhPB, 4, BIG_ENDIAN);
-		pCapFSFB2.back().timestampL = char2int(memblock, currentPos + TimeStampLowOffsetEnhPB, 4, BIG_ENDIAN);
+		int pCapPortsrc = char2int(memblock, currentPos + PortSrcOffset, 2, BIG_ENDIAN);
+		if (pCapPortsrc != portSrc) { currentPos += interfaceBlockLength; return true; }
+		int pCapPortdst = char2int(memblock, currentPos + PortDstOffset, 2, BIG_ENDIAN);
+		if (pCapPortdst != portDst) { currentPos += interfaceBlockLength; return true; }
+		// All filters have passed and the packet can be added
+		addFSFB2BSDPacket(pCapIPsrc, pCapIPdst, pCapPortsrc, pCapPortdst);
+		nbFilteredPacket++;
+		lastBSDptr->timestampH = char2int(memblock, currentPos + TimeStampHighOffsetEnhPB, 4, BIG_ENDIAN);
+		lastBSDptr->timestampL = char2int(memblock, currentPos + TimeStampLowOffsetEnhPB, 4, BIG_ENDIAN);
 		int payloadWidth = char2int(memblock, currentPos + IPpacketWidth, 2, BIG_ENDIAN); // size of the IP payload
-		pCapFSFB2.back().payload = new char[payloadWidth];
-		memcpy(pCapFSFB2.back().payload, memblock + currentPos + IPpayloadOffset + packetDataOffsetEnhPB, payloadWidth);
+		lastBSDptr->payload = new char[payloadWidth];
+		memcpy(lastBSDptr->payload, memblock + currentPos + IPpayloadOffset + packetDataOffsetEnhPB, payloadWidth);
 		if (DEBUG) {
-			std::cout << "IP Source: " << pCapFSFB2.back().IPsrc << ":" << pCapFSFB2.back().portsrc << " and IP Destination: " << pCapFSFB2.back().IPdst << ":" << pCapFSFB2.back().portdst << std::endl;
+			std::cout << "IP Source: " << lastBSDptr->IPsrc << ":" << lastBSDptr->portsrc << " and IP Destination: " << lastBSDptr->IPdst << ":" << lastBSDptr->portdst << std::endl;
 			for (int cpt = 0; cpt < payloadWidth; cpt++) {
-				std::cout << (int)pCapFSFB2.back().payload[cpt] << " ";
+				std::cout << (int)lastBSDptr->payload[cpt] << " ";
 			}
 			std::cout << std::endl;
 		}
@@ -179,7 +213,7 @@ public:
 			}
 			if (currentPos >= nbByteinBuffer) { EOFreached = true; }
 		}
-		std::cout << "End of memory buffer reached" << std::endl;
+		std::cout << "End of memory buffer reached, " << nbFilteredPacket << " packets found" << std::endl;
 		return true;
 	}
 };
