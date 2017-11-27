@@ -6,8 +6,9 @@
 #include <fstream>
 #include "libPcapNg.h"
 #include <string>
+#include <ctime> // For converting the epoch time to local time
 
-const bool DEBUG = false;
+const bool DEBUG = true;
 const int IPpayloadOffset = 0x0e; // Offset to the start of the IP packet from the start of the ethernet frame
 const int FSFB2OffSetPayLoad = 0x49; // Offset to the start of the FSFB2 payload from the start of the ethernet frame
 const int packetDataOffsetEnhPB = 28; // Offset of packet data position in enhanced Packet Block
@@ -49,6 +50,16 @@ int char2int(char *input, int start, int width, endianness iEndianess) {
 	return output;
 }
 
+// Convert Epoch time from pCapNG file format into EPOCH time
+std::time_t pCapEpoch2Epoch(int timeH, int timeL) {
+	std::time_t t;
+	t = timeH;
+	t = t << 32;
+	t += timeL;
+	t = t / 1e6;
+	return(t);
+}
+
 // Implementation of class FSFB2BSDpacket
 FSFB2BSDpacket::FSFB2BSDpacket() {
 	nextFSFB2BSDPacket = NULL;
@@ -65,165 +76,162 @@ FSFB2BSDpacket::~FSFB2BSDpacket() {
 }
 
 
-class fileManagement {
-private:
-	char* memblock; // Temporary buffer for reading pCapNG file
-	int nbByteinBuffer = 0;
-	endianness localEndianness; // Temporary variable for storing the endianness of the machine capture the pCap
-	int globalHeaderSize = 0;
-	int currentPos = 0; // Temporary counter to track position within the pCap
-	std::string namePcapFile; // Name of the pCapNG file
-	FSFB2BSDpacket* lastBSDptr = NULL; // Keep track of the last BSD (for quick addition to linked list)
-	int nbFilteredPacket = 0;
-
-public:
-	FSFB2BSDpacket* rootBSDptr;
-
-	fileManagement(std::string name_input) {
+FileManagement::FileManagement(std::string name_input) {
 		namePcapFile = name_input;
 		memblock = NULL;
 		rootBSDptr = NULL;
 		lastBSDptr = rootBSDptr;
+		nbByteinBuffer = 0;
+		globalHeaderSize = 0;
+		currentPos = 0; // Temporary counter to track position within the pCap
+		lastBSDptr = NULL; // Keep track of the last BSD (for quick addition to linked list)
+		nbFilteredPacket = 0;
 	}
 
-	~fileManagement() {
+FileManagement::~FileManagement() {
 		if (memblock != NULL) { delete[] memblock; }
 		delete rootBSDptr;
 	}
 
-	// Load the pCapNG file in memory
-	bool Load() {
-		std::ifstream file(namePcapFile, std::ios::in | std::ios::binary | std::ios::ate);
-		if (file.is_open()) {
-			std::streampos size = file.tellg(); // size of the file
-			nbByteinBuffer = size;
-			memblock = new char[size];
-			file.seekg(0, std::ios::beg);
-			file.read(memblock, size);
-			file.close();
-			return(true);
-		}
-		return(false);
-	}
-
-	// Parse the Section Header
-	bool parseSectionHeader() {
-		std::string BT;
-		
-		BT.append(1, memblock[0]).append(1, memblock[1]).append(1, memblock[2]).append(1, memblock[3]); // concatenate bytes 0 to 3 to build Block Type
-		if (BT != BLOCKTYPE_NG) { std::cout << "Incorrect file format: header does not correspond to pCapNG file" << std::endl; return(false); }
-		else {
-			globalHeaderSize = char2int(memblock, 4, 4, LITTLE_ENDIAN);
-			std::string BOM;
-			BOM.append(1, memblock[8]).append(1, memblock[9]).append(1, memblock[10]).append(1, memblock[11]); // concatenate bytes 8 to 11 to build Byte-Order Magic (endianness test) 
-			if (BOM == BYTEORDERMAGIC_BE) { localEndianness = BIG_ENDIAN; }
-			else if (BOM == BYTEORDERMAGIC_LE) { localEndianness = LITTLE_ENDIAN; }
-			else { std::cout << "Incorrect file format: endianness test incorrect" << std::endl; return(false); }
-
-		}
-		currentPos += globalHeaderSize;
+// Load the pCapNG file in memory
+bool FileManagement::Load() {
+	std::ifstream file(namePcapFile, std::ios::in | std::ios::binary | std::ios::ate);
+	if (file.is_open()) {
+		std::streampos size = file.tellg(); // size of the file
+		nbByteinBuffer = size;
+		memblock = new char[size];
+		file.seekg(0, std::ios::beg);
+		file.read(memblock, size);
+		file.close();
 		return(true);
 	}
+	return(false);
+}
+
+	// Parse the Section Header
+bool FileManagement::parseSectionHeader() {
+	std::string BT;
+		
+	BT.append(1, memblock[0]).append(1, memblock[1]).append(1, memblock[2]).append(1, memblock[3]); // concatenate bytes 0 to 3 to build Block Type
+	if (BT != BLOCKTYPE_NG) { std::cout << "Incorrect file format: header does not correspond to pCapNG file" << std::endl; return(false); }
+	else {
+		globalHeaderSize = char2int(memblock, 4, 4, LITTLE_ENDIAN);
+		std::string BOM;
+		BOM.append(1, memblock[8]).append(1, memblock[9]).append(1, memblock[10]).append(1, memblock[11]); // concatenate bytes 8 to 11 to build Byte-Order Magic (endianness test) 
+		if (BOM == BYTEORDERMAGIC_BE) { localEndianness = BIG_ENDIAN; }
+		else if (BOM == BYTEORDERMAGIC_LE) { localEndianness = LITTLE_ENDIAN; }
+		else { std::cout << "Incorrect file format: endianness test incorrect" << std::endl; return(false); }
+
+	}
+	currentPos += globalHeaderSize;
+	return(true);
+}
 
 	//TODO: check that the allocation has succeeded
-	bool addFSFB2BSDPacket() {
-		if (rootBSDptr == NULL) {
-			rootBSDptr = new FSFB2BSDpacket();
-			lastBSDptr = rootBSDptr;
-		}
-		else {
-			lastBSDptr->nextFSFB2BSDPacket = new FSFB2BSDpacket();
-		}
-		return true;
+bool FileManagement::addFSFB2BSDPacket() {
+	if (rootBSDptr == NULL) {
+		rootBSDptr = new FSFB2BSDpacket();
+		lastBSDptr = rootBSDptr;
 	}
+	else {
+		lastBSDptr->nextFSFB2BSDPacket = new FSFB2BSDpacket();
+	}
+	return true;
+}
 
-	bool addFSFB2BSDPacket(std::string IPsrc, std::string IPdst, int portSrc, int portDst) {
-		addFSFB2BSDPacket();
-		lastBSDptr->IPsrc = IPsrc;
-		lastBSDptr->IPdst = IPdst;
-		lastBSDptr->portsrc = portSrc;
-		lastBSDptr->portdst = portDst;
-		return true;
-	}
+bool FileManagement::addFSFB2BSDPacket(std::string IPsrc, std::string IPdst, int portSrc, int portDst) {
+	addFSFB2BSDPacket();
+	lastBSDptr->IPsrc = IPsrc;
+	lastBSDptr->IPdst = IPdst;
+	lastBSDptr->portsrc = portSrc;
+	lastBSDptr->portdst = portDst;
+	return true;
+}
 
 	// Parse the Interface Description
-	bool parseInterfaceDescription() {
-		int interfaceBlockLength = 0;
+bool FileManagement::parseInterfaceDescription() {
+	int interfaceBlockLength = 0;
 		
-		interfaceBlockLength = char2int(memblock, currentPos + 4, 4, localEndianness);
+	interfaceBlockLength = char2int(memblock, currentPos + 4, 4, localEndianness);
+	currentPos += interfaceBlockLength;
+	return true;
+}
+
+bool FileManagement::parseEnhancedPacketBlock(std::string IPsrc, std::string IPdst, int portSrc, int portDst) {
+	int interfaceBlockLength = 0;
+
+	interfaceBlockLength = char2int(memblock, currentPos + 4, 4, localEndianness);
+	if (char2int(memblock[currentPos + IPOffsetprotocol]) != UDP) {
 		currentPos += interfaceBlockLength;
-		return true;
+		return(true); // if the packet is not UDP go to next
 	}
 
-	bool parseEnhancedPacketBlock(std::string IPsrc, std::string IPdst, int portSrc, int portDst) {
-		int interfaceBlockLength = 0;
-
-		interfaceBlockLength = char2int(memblock, currentPos + 4, 4, localEndianness);
-		if (char2int(memblock[currentPos + IPOffsetprotocol]) != UDP) {
-			currentPos += interfaceBlockLength;
-			return(true); // if the packet is not UDP go to next
+	std::string pCapIPsrc = std::to_string(char2int(memblock[currentPos + IPSrcOffset]))
+		+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 1]))
+		+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 2])) 
+		+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 3]));
+	if (pCapIPsrc != IPsrc) { currentPos += interfaceBlockLength; return true; }
+	std::string pCapIPdst = std::to_string(char2int(memblock[currentPos + IPDstOffset]))
+		+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 1]))
+		+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 2])) 
+		+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 3]));
+	if (pCapIPdst != IPdst) { currentPos += interfaceBlockLength; return true; }
+	// Note: Network convention is big endian - not related to the capture endianness of the machine
+	int pCapPortsrc = char2int(memblock, currentPos + PortSrcOffset, 2, BIG_ENDIAN);
+	if (pCapPortsrc != portSrc) { currentPos += interfaceBlockLength; return true; }
+	int pCapPortdst = char2int(memblock, currentPos + PortDstOffset, 2, BIG_ENDIAN);
+	if (pCapPortdst != portDst) { currentPos += interfaceBlockLength; return true; }
+	// All filters have passed and the packet can be added
+	addFSFB2BSDPacket(pCapIPsrc, pCapIPdst, pCapPortsrc, pCapPortdst);
+	nbFilteredPacket++;
+	lastBSDptr->timestampH = char2int(memblock, currentPos + TimeStampHighOffsetEnhPB, 4, localEndianness);
+	lastBSDptr->timestampL = char2int(memblock, currentPos + TimeStampLowOffsetEnhPB, 4, localEndianness);
+	int payloadWidth = char2int(memblock, currentPos + IPpacketWidth, 2, BIG_ENDIAN); // size of the IP payload
+	lastBSDptr->payload = new char[payloadWidth];
+	memcpy(lastBSDptr->payload, memblock + currentPos + IPpayloadOffset + packetDataOffsetEnhPB, payloadWidth);
+	if (DEBUG) {
+		std::time_t t;
+		tm _tm;
+		t = pCapEpoch2Epoch(lastBSDptr->timestampH, lastBSDptr->timestampL);
+		localtime_s(&_tm, &t);
+		std::cout << "TimeStamp:  " << _tm.tm_mday << "/" << _tm.tm_mon+1 << "/" << _tm.tm_year + 1900 << " "
+			<< _tm.tm_hour << ":" << _tm.tm_min << ":" << _tm.tm_sec << " IP Source: " << lastBSDptr->IPsrc 
+			<< ":" << lastBSDptr->portsrc << " and IP Destination: " << lastBSDptr->IPdst << ":" << lastBSDptr->portdst 
+			<< std::endl;
+		for (int cpt = 0; cpt < payloadWidth; cpt++) {
+			std::cout << (int)lastBSDptr->payload[cpt] << " ";
 		}
-
-		std::string pCapIPsrc = std::to_string(char2int(memblock[currentPos + IPSrcOffset]))
-			+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 1]))
-			+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 2])) 
-			+ "." + std::to_string(char2int(memblock[currentPos + IPSrcOffset + 3]));
-		if (pCapIPsrc != IPsrc) { currentPos += interfaceBlockLength; return true; }
-		std::string pCapIPdst = std::to_string(char2int(memblock[currentPos + IPDstOffset]))
-			+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 1]))
-			+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 2])) 
-			+ "." + std::to_string(char2int(memblock[currentPos + IPDstOffset + 3]));
-		if (pCapIPdst != IPdst) { currentPos += interfaceBlockLength; return true; }
-		// Note: Network convention is big endian - not related to the capture endianness of the machine
-		int pCapPortsrc = char2int(memblock, currentPos + PortSrcOffset, 2, BIG_ENDIAN);
-		if (pCapPortsrc != portSrc) { currentPos += interfaceBlockLength; return true; }
-		int pCapPortdst = char2int(memblock, currentPos + PortDstOffset, 2, BIG_ENDIAN);
-		if (pCapPortdst != portDst) { currentPos += interfaceBlockLength; return true; }
-		// All filters have passed and the packet can be added
-		addFSFB2BSDPacket(pCapIPsrc, pCapIPdst, pCapPortsrc, pCapPortdst);
-		nbFilteredPacket++;
-		lastBSDptr->timestampH = char2int(memblock, currentPos + TimeStampHighOffsetEnhPB, 4, BIG_ENDIAN);
-		lastBSDptr->timestampL = char2int(memblock, currentPos + TimeStampLowOffsetEnhPB, 4, BIG_ENDIAN);
-		int payloadWidth = char2int(memblock, currentPos + IPpacketWidth, 2, BIG_ENDIAN); // size of the IP payload
-		lastBSDptr->payload = new char[payloadWidth];
-		memcpy(lastBSDptr->payload, memblock + currentPos + IPpayloadOffset + packetDataOffsetEnhPB, payloadWidth);
-		if (DEBUG) {
-			std::cout << "IP Source: " << lastBSDptr->IPsrc << ":" << lastBSDptr->portsrc << " and IP Destination: " << lastBSDptr->IPdst << ":" << lastBSDptr->portdst << std::endl;
-			for (int cpt = 0; cpt < payloadWidth; cpt++) {
-				std::cout << (int)lastBSDptr->payload[cpt] << " ";
-			}
-			std::cout << std::endl;
-		}
-		currentPos += interfaceBlockLength;
-		return true;
+		std::cout << std::endl;
 	}
+	currentPos += interfaceBlockLength;
+	return true;
+}
 
-	bool parseFSFB2(std::string ipSrc, std::string ipDst, int portSrc, int portDst) {
-		bool EOFreached = false;
+bool FileManagement::parseFSFB2(std::string ipSrc, std::string ipDst, int portSrc, int portDst) {
+	bool EOFreached = false;
 
-		if (parseSectionHeader() == false) { return false; }
-		while (!EOFreached) {
-			int blockType = char2int(memblock, currentPos, 4, LITTLE_ENDIAN);
+	if (parseSectionHeader() == false) { return false; }
+	while (!EOFreached) {
+		int blockType = char2int(memblock, currentPos, 4, LITTLE_ENDIAN);
 
-			if (blockType == 1) {
-				if (parseInterfaceDescription() == false) { return false; }
-			}
-			if (blockType == 6) {
-				if (parseEnhancedPacketBlock(ipSrc, ipDst, portSrc, portDst) == false) { return false; }
-			}
-			if (currentPos >= nbByteinBuffer) { EOFreached = true; }
+		if (blockType == 1) {
+			if (parseInterfaceDescription() == false) { return false; }
 		}
-		std::cout << "End of memory buffer reached, " << nbFilteredPacket << " packets found" << std::endl;
-		return true;
+		if (blockType == 6) {
+			if (parseEnhancedPacketBlock(ipSrc, ipDst, portSrc, portDst) == false) { return false; }
+		}
+		if (currentPos >= nbByteinBuffer) { EOFreached = true; }
 	}
-};
+	std::cout << "End of memory buffer reached, " << nbFilteredPacket << " packets found" << std::endl;
+	return true;
+}
 
 int main()
 {
 	std::string name_file;
 	std::cout << "Please provide name of the pcapng file: ";
 	getline(std::cin, name_file);
-	fileManagement* myFile = new fileManagement(name_file);
+	FileManagement* myFile = new FileManagement(name_file);
 	if (myFile->Load() == true) {
 		std::cout << "Successful loading in memory" << std::endl;
 	}
